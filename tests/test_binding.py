@@ -667,6 +667,46 @@ def test_depth_limit_counts_the_nodes_above() -> None:
     upper[0].gen_single_2d(0.0, 0.0, SEED)
 
 
+@pytest.mark.parametrize("short_path_first", [True, False])
+def test_cycle_through_a_node_reached_by_two_paths_is_rejected(short_path_first: bool) -> None:
+    shared = fn2.Node("Abs")
+    shared.set("Source", fn2.Node("Simplex"))
+    above = fn2.Node("Abs")
+    above.set("Source", shared)
+    top = fn2.Node("Abs")
+    top.set("Source", above)
+    # Reaches `shared` as its own member and through `top` and `above`.
+    both = fn2.Node("Add")
+    both.set("LHS", shared if short_path_first else top)
+    both.set("RHS", top if short_path_first else shared)
+    # Below ten nodes, so that one set() makes all of these deeper, `shared` by two paths.
+    nodes = chain(10)
+    nodes[-2].set("Source", both)
+    for upper in (above, top):
+        with pytest.raises(ValueError, match="depends on this node"):
+            shared.set("Source", upper)
+    nodes[0].gen_single_2d(0.0, 0.0, SEED)
+
+
+def test_refused_node_member_changes_nothing() -> None:
+    warp = fn2.Node("DomainWarpGradient")
+    warp.set("Source", fn2.Node("Simplex"))
+    fractal = fn2.Node("DomainWarpFractalProgressive")
+    fractal.set("Domain Warp Source", warp)
+    # `fractal` is 100 nodes deep.
+    upper = chain(100)
+    upper[-2].set("Source", fractal)
+    lower = chain(20)
+    # Only a domain warp node fits here.
+    with pytest.raises(TypeError, match="does not accept"):
+        fractal.set("Domain Warp Source", lower[0])
+    # `lower` got no deeper and is no member of `fractal`: all of `upper` fits below it.
+    lower[-2].set("Source", upper[0])
+    assert np.array_equal(
+        lower[0].gen_position_array_2d(X, Y, SEED), upper[0].gen_position_array_2d(X, Y, SEED)
+    )
+
+
 def test_deepest_tree_fits_a_small_stack() -> None:
     # Cellular nodes with a fourth coordinate, from AddDimension, have the largest stack
     # frames. The stack is twice what the README names. The values are not looked at:
