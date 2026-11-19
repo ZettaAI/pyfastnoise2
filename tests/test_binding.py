@@ -768,6 +768,44 @@ def test_concurrent_set_cannot_build_a_cycle() -> None:
         sys.setswitchinterval(interval)
 
 
+def test_concurrent_set_of_one_hybrid_member() -> None:
+    def constant() -> fn2.Node:
+        node = fn2.Node("Constant")
+        node.set("Value", 0.25)
+        return node
+
+    def to_node() -> None:
+        source = constant()
+        barrier.wait()
+        node.set("Gain", source)
+
+    def to_float() -> None:
+        barrier.wait()
+        node.set("Gain", 0.5)
+
+    node = simplex_fbm()
+    node.set("Gain", constant())
+    with_node = node.gen_position_array_2d(X, Y, SEED)
+    assert not np.array_equal(with_node, GOLDEN_2D)
+    interval = sys.getswitchinterval()
+    # Switch threads as often as possible, also between the two halves of a set().
+    sys.setswitchinterval(1e-6)
+    try:
+        for _ in range(2_000):
+            barrier = threading.Barrier(2)
+            threads = [threading.Thread(target=to_node), threading.Thread(target=to_float)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            # The member is what the later set() gave it, in FastNoise2 as in the node.
+            values = node.gen_position_array_2d(X, Y, SEED)
+            assert np.array_equal(values, with_node if "Gain" in node._sources else GOLDEN_2D)
+    finally:
+        sys.setswitchinterval(interval)
+    assert not _binding._dropped
+
+
 def test_source_deleted_before_use() -> None:
     source = fn2.Node("Simplex")
     source.set("Feature Scale", 1.0)
