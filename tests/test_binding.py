@@ -17,6 +17,7 @@ import signal
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -810,6 +811,81 @@ def test_node_replaced_as_a_member_is_freed() -> None:
     node.set("Gain", fn2.Node("Constant"))
     node.set("Gain", 0.5)
     assert not _binding._dropped
+
+
+def test_callback_inside_set_cannot_create_or_change_nodes() -> None:
+    node, other = fn2.Node("Abs"), fn2.Node("Simplex")
+    refused: list[str] = []
+
+    def use_nodes(_: object) -> None:
+        for use in (
+            lambda: fn2.Node("Simplex"),
+            lambda: fn2.Node.from_encoded(FBM_ENCODED),
+            lambda: node.set("Source", other),
+            lambda: other.set("Feature Scale", 2.0),
+        ):
+            try:
+                use()
+            except RuntimeError as error:
+                refused.append(str(error))
+
+    source = fn2.Node("Simplex")
+    node.set("Source", source)
+    watch = weakref.ref(source, use_nodes)
+    del source
+    # Ends a test run in which the callback waits for the lock that its thread holds.
+    signal.alarm(30)
+    try:
+        # The first source is dropped inside set(), which runs the callback there.
+        node.set("Source", simplex_fbm())
+    finally:
+        signal.alarm(0)
+    assert watch() is None
+    assert len(refused) == 4
+    assert all("already creating or changing" in message for message in refused)
+    assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), np.abs(GOLDEN_2D))
+    assert not _binding._dropped
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="fork without exec is only safe on Linux")
+def test_fork_in_a_callback_inside_set() -> None:
+    pids: list[int] = []
+    refused: list[str] = []
+
+    def fork(_: object) -> None:
+        pids.append(os.fork())
+        if pids[-1] == 0:
+            # Ends a child that waits for a lock.
+            signal.alarm(10)
+        # Parent and child are still inside set().
+        try:
+            fn2.Node("Simplex")
+        except RuntimeError as error:
+            refused.append(str(error))
+
+    node, source = fn2.Node("Abs"), fn2.Node("Simplex")
+    node.set("Source", source)
+    watch = weakref.ref(source, fork)
+    del source
+    status = 1
+    try:
+        # Ends a test run in which the fork waits for the lock that its thread holds.
+        signal.alarm(30)
+        node.set("Source", simplex_fbm())
+        # Parent and child have left set(): each can build a tree and use the one it has.
+        if (
+            watch() is None
+            and len(refused) == 1
+            and np.array_equal(simplex_fbm().gen_position_array_3d(X, Y, Z, SEED), GOLDEN_3D)
+            and np.array_equal(node.gen_position_array_2d(X, Y, SEED), np.abs(GOLDEN_2D))
+        ):
+            status = 0
+    finally:
+        signal.alarm(0)
+        if pids == [0]:
+            os._exit(status)
+    assert status == 0
+    assert os.waitstatus_to_exitcode(os.waitpid(pids[0], 0)[1]) == 0
 
 
 def test_node_outlives_the_trees_it_was_in() -> None:

@@ -207,8 +207,15 @@ def _node_type(name: str) -> _NodeType:
 
 # Held for every native call that allocates or frees nodes, since the node pools of
 # FastNoise2 do not survive a free next to another allocation or free, and for all of a
-# set(), since two at once could each pass the cycle check of the other.
-_lock: Final = threading.Lock()
+# set(), since two at once could each pass the cycle check of the other. The code that
+# holds it is a section. The collector runs finalizers, __del__ methods and weakref
+# callbacks anywhere, also inside a section, where a thread would wait forever for a
+# plain lock that it holds itself. An RLock lets its holder through, at every instant
+# from when it is taken, and _enter() then turns the thread away: no section is entered
+# twice.
+_lock: Final = threading.RLock()
+# Whether the holder of the lock is inside a section. Only the holder reads or writes it.
+_inside = False
 # Handles of collected nodes that are still to be freed. A finalizer only queues its
 # handle here: the collector runs it anywhere, also inside a section that holds the lock.
 _dropped: Final[deque[int]] = deque()
@@ -220,10 +227,30 @@ _RELEASER: Final[int] = _lib.fnNewFromMetadata(_RELEASER_TYPE.type_id, _MAX_FEAT
 _RELEASER_MEMBER: Final = _RELEASER_TYPE.indices["RHS"]
 
 
+def _enter(blocking: bool = True) -> bool:
+    """Take the lock and enter the section it guards. ``False`` if this thread is inside
+    the section already or, without ``blocking``, if another thread holds the lock."""
+    global _inside
+    if not _lock.acquire(blocking=blocking):
+        return False
+    if _inside:
+        # The collector ran the caller inside a section of this thread.
+        _lock.release()
+        return False
+    _inside = True
+    return True
+
+
+def _leave() -> None:
+    global _inside
+    _inside = False
+    _lock.release()
+
+
 def _free_dropped() -> None:
     """Free the nodes in ``_dropped``, unless the lock is held: its holder frees them when
     it lets go."""
-    while _dropped and _lock.acquire(blocking=False):
+    while _dropped and _enter(blocking=False):
         try:
             # Another thread may have emptied the queue since the check above. Only the
             # holder of the lock takes from it.
@@ -237,7 +264,7 @@ def _free_dropped() -> None:
             _lib.fnDeleteNodeRef(handle)
             _lib.fnSetHybridFloat(_RELEASER, _RELEASER_MEMBER, 0.0)
         finally:
-            _lock.release()
+            _leave()
 
 
 def _drop(handle: int) -> None:
@@ -246,27 +273,35 @@ def _drop(handle: int) -> None:
     _free_dropped()
 
 
-def _unlock() -> None:
-    """Release the lock and free the nodes dropped while it was held."""
-    _lock.release()
-    _free_dropped()
-
-
 class _Exclusive:
-    """Context that holds the lock."""
+    """Context of a section that holds the lock."""
 
     def __enter__(self) -> None:
-        _lock.acquire()
+        if not _enter():
+            raise RuntimeError(
+                "this thread is already creating or changing a pyfastnoise2 node: a "
+                "__del__ method or weakref callback, which the garbage collector may run "
+                "inside that call, must not create or change nodes"
+            )
 
     def __exit__(self, *error: object) -> None:
-        _unlock()
+        _leave()
+        # Those dropped inside the section.
+        _free_dropped()
 
 
 _exclusive: Final = _Exclusive()
 
-# A child forked while another thread is inside such a section would inherit the lock as
-# held, and the node pools in the middle of a call.
-os.register_at_fork(before=_lock.acquire, after_in_parent=_unlock, after_in_child=_unlock)
+
+def _after_fork() -> None:
+    _lock.release()
+    _free_dropped()
+
+
+# A child forked while another thread is inside a section would inherit the lock as held,
+# and the node pools in the middle of a call. The fork holds the lock without entering a
+# section: it changes no node, and code that the collector runs inside a section may fork.
+os.register_at_fork(before=_lock.acquire, after_in_parent=_after_fork, after_in_child=_after_fork)
 
 
 # A GeneratorCache node keeps the values of its last batch per thread and returns them
@@ -499,6 +534,8 @@ class Node:
     with one exception: do not call :meth:`set` on a node while another thread generates
     from a tree that contains it. FastNoise2 reads the members of a node without a lock,
     and a node that :meth:`set` replaces may be freed while that thread still uses it.
+    A ``__del__`` method or weakref callback must not create or change nodes: it raises
+    ``RuntimeError`` when the garbage collector runs it while its thread does the same.
 
     A tree is at most 128 nodes deep, since generating recurses through a chain of
     members on the native stack: :meth:`set` refuses a member that would make a longer
@@ -570,6 +607,10 @@ class Node:
         if not isinstance(encoded, str):
             raise TypeError(f"encoded must be a str, not {type(encoded).__name__}")
         _max_feature_set(max_simd_level)
+        # Raises in a thread that is creating or changing a node already, which is not an
+        # error of the string.
+        with _exclusive:
+            pass
         try:
             return _EncodedNodeTree(encoded, max_simd_level).root()
         except (ValueError, TypeError, LookupError, RuntimeError) as error:
@@ -607,7 +648,7 @@ class Node:
                 self._set_source(what, name, member, index, value)
             return
         # Before the lock is taken: __float__ and __index__ are code of the caller, which
-        # would wait for the lock forever if it created or changed a node.
+        # may create or change nodes.
         number = _member_number(what, member, value)
         with _exclusive:
             if member.kind == "hybrid":
