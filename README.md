@@ -8,11 +8,28 @@ binding that builds node trees by name and fills NumPy arrays with 2D and 3D noi
 
 The wheels are attached to the
 [releases](https://github.com/ZettaAI/pyfastnoise2/releases); the package is not on PyPI.
-Install the wheel of your platform by its URL:
+Point pip, or `uv pip`, at the files of a release:
 
 ```sh
-pip install https://github.com/ZettaAI/pyfastnoise2/releases/download/v1.1.1/<wheel>
+pip install pyfastnoise2==1.1.1 \
+    --find-links https://github.com/ZettaAI/pyfastnoise2/releases/expanded_assets/v1.1.1
 ```
+
+A uv project declares the release as a flat index and takes the package only from there:
+
+```toml
+[[tool.uv.index]]
+name = "pyfastnoise2"
+url = "https://github.com/ZettaAI/pyfastnoise2/releases/expanded_assets/v1.1.1"
+format = "flat"
+explicit = true
+
+[tool.uv.sources]
+pyfastnoise2 = { index = "pyfastnoise2" }
+```
+
+GitHub lists the files without hashes, so `uv.lock` records none for them.
+`uv pip install -r` does not read the sources and needs `--find-links` like pip.
 
 | Platform | Wheel name ends in |
 | --- | --- |
@@ -21,7 +38,9 @@ pip install https://github.com/ZettaAI/pyfastnoise2/releases/download/v1.1.1/<wh
 | macOS 11 or newer, Apple silicon | `macosx_11_0_arm64.whl` |
 
 The binding does not use the Python C API, so each wheel is tagged `py3-none` and serves
-every Python version from 3.10 on. NumPy 1.21 or newer is the only dependency.
+every Python version from 3.10 on. NumPy 1.21 or newer is the only dependency. On another
+platform the installer builds the source distribution, see
+[Building from source](#building-from-source).
 
 ## Example
 
