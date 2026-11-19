@@ -929,7 +929,7 @@ def test_callback_inside_set_cannot_create_or_change_nodes() -> None:
     assert not _binding._dropped
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="fork without exec is only safe on Linux")
+@pytest.mark.skipif(sys.platform != "linux", reason="checked on Linux only")
 def test_fork_in_a_callback_inside_set() -> None:
     pids: list[int] = []
     refused: list[str] = []
@@ -1159,7 +1159,6 @@ def test_generation_from_threads() -> None:
     assert all(np.array_equal(result, GOLDEN_2D) for result in results)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="fork without exec is only safe on Linux")
 def test_node_survives_fork() -> None:
     node = simplex_fbm()
     read_end, write_end = os.pipe()
@@ -1187,7 +1186,9 @@ def test_node_survives_fork() -> None:
     assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="fork without exec is only safe on Linux")
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="fork next to a running thread is only safe on Linux"
+)
 @pytest.mark.filterwarnings("ignore:.*multi-threaded.*fork:DeprecationWarning")
 def test_fork_while_a_thread_builds_nodes() -> None:
     stop = threading.Event()
