@@ -347,6 +347,25 @@ def _c_float(name: str, value: Any) -> float:
         raise ValueError(f"{name} is beyond the range of a float") from None
 
 
+def _member_number(what: str, member: Member, value: Any) -> float:
+    """``value`` as the C number of a member that is not set to a node."""
+    if member.kind == "node":
+        raise TypeError(f"{what} must be a Node, not {type(value).__name__}")
+    if member.kind in ("hybrid", "float"):
+        return _c_float(what, value)
+    if member.kind == "int":
+        return _c_int(what, value)
+    if isinstance(value, str):
+        if value not in member.options:
+            raise ValueError(f"{what} must be one of {member.options}, not {value!r}")
+        return member.options.index(value)
+    # The library does not check the range of an enum.
+    number = _c_int(what, value, lowest=0)
+    if number >= len(member.options):
+        raise ValueError(f"{what} has {len(member.options)} options, not {number}")
+    return number
+
+
 def _float32_array(name: str, array: Any) -> Float32Array:
     """``array`` if the library may read it through a bare ``float*``."""
     if not isinstance(array, np.ndarray):
@@ -582,41 +601,28 @@ class Node:
                 f"{', '.join(map(repr, self._type.members))}"
             )
         index = self._type.indices[name]
-        with _exclusive:
-            if isinstance(value, Node):
-                self._set_source(name, member, index, value)
-            else:
-                self._set_value(name, member, index, value)
-
-    def _set_value(self, name: str, member: Member, index: int, value: float | str) -> None:
         what = f"{self.node_type} member {name!r}"
-        if member.kind == "node":
-            raise TypeError(f"{what} must be a Node, not {type(value).__name__}")
-        if member.kind == "hybrid":
-            accepted = _lib.fnSetHybridFloat(self._handle, index, _c_float(what, value))
-            if accepted:
-                # A constant replaces the node the library held for this member.
-                self._sources.pop(name, None)
-        elif member.kind == "float":
-            accepted = _lib.fnSetVariableFloat(self._handle, index, _c_float(what, value))
-        else:
-            if member.kind == "int":
-                number = _c_int(what, value)
-            elif isinstance(value, str):
-                if value not in member.options:
-                    raise ValueError(f"{what} must be one of {member.options}, not {value!r}")
-                number = member.options.index(value)
+        if isinstance(value, Node):
+            with _exclusive:
+                self._set_source(what, name, member, index, value)
+            return
+        # Before the lock is taken: __float__ and __index__ are code of the caller, which
+        # would wait for the lock forever if it created or changed a node.
+        number = _member_number(what, member, value)
+        with _exclusive:
+            if member.kind == "hybrid":
+                accepted = _lib.fnSetHybridFloat(self._handle, index, number)
+                if accepted:
+                    # A constant replaces the node the library held for this member.
+                    self._sources.pop(name, None)
+            elif member.kind == "float":
+                accepted = _lib.fnSetVariableFloat(self._handle, index, number)
             else:
-                # The library does not check the range of an enum.
-                number = _c_int(what, value, lowest=0)
-                if number >= len(member.options):
-                    raise ValueError(f"{what} has {len(member.options)} options, not {number}")
-            accepted = _lib.fnSetVariableIntEnum(self._handle, index, number)
+                accepted = _lib.fnSetVariableIntEnum(self._handle, index, number)
         if not accepted:
             raise RuntimeError(f"FastNoise2 rejected {value!r} for {what}")
 
-    def _set_source(self, name: str, member: Member, index: int, source: Node) -> None:
-        what = f"{self.node_type} member {name!r}"
+    def _set_source(self, what: str, name: str, member: Member, index: int, source: Node) -> None:
         if member.kind not in ("node", "hybrid"):
             raise TypeError(f"{what} must be {member.kind}, not a Node")
         if source._feature_set != self._feature_set:

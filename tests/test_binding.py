@@ -8,6 +8,7 @@ import gc
 import hashlib
 import importlib.metadata
 import itertools
+import numbers
 import os
 import pickle
 import platform
@@ -256,6 +257,35 @@ def test_set_enum_by_name_and_index() -> None:
 
     assert np.array_equal(values("Manhattan"), values(2))
     assert not np.array_equal(values("Manhattan"), values("Euclidean"))
+
+
+def test_member_value_conversion_may_use_nodes() -> None:
+    class Number:
+        """A number whose conversion creates and changes a node."""
+
+        def __float__(self) -> float:
+            fn2.Node("Simplex").set("Feature Scale", 2.0)
+            return 0.25
+
+        def __index__(self) -> int:
+            fn2.Node("Simplex").set("Seed Offset", 2)
+            return 2
+
+    numbers.Real.register(Number)
+    number: Any = Number()
+    node, expected = simplex_fbm(), simplex_fbm()
+    for name, value in {"Lacunarity": 0.25, "Gain": 0.25, "Octaves": 2}.items():
+        node.set(name, number)
+        expected.set(name, value)
+    assert np.array_equal(
+        node.gen_position_array_2d(X, Y, SEED), expected.gen_position_array_2d(X, Y, SEED)
+    )
+    node, expected = fn2.Node("CellularDistance"), fn2.Node("CellularDistance")
+    node.set("Distance Function", number)
+    expected.set("Distance Function", "Manhattan")
+    assert np.array_equal(
+        node.gen_position_array_2d(X, Y, SEED), expected.gen_position_array_2d(X, Y, SEED)
+    )
 
 
 def test_hybrid_takes_node_or_float() -> None:
