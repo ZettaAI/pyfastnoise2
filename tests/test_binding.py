@@ -274,19 +274,23 @@ def test_member_value_conversion_may_use_nodes() -> None:
 
     numbers.Real.register(Number)
     number: Any = Number()
-    node, expected = simplex_fbm(), simplex_fbm()
+    fbm, cellular = simplex_fbm(), fn2.Node("CellularDistance")
+    # Ends a test run in which a conversion waits for a lock that its thread holds.
+    signal.alarm(30)
+    try:
+        for name in ("Lacunarity", "Gain", "Octaves"):
+            fbm.set(name, number)
+        cellular.set("Distance Function", number)
+    finally:
+        signal.alarm(0)
+    expected_fbm, expected_cellular = simplex_fbm(), fn2.Node("CellularDistance")
     for name, value in {"Lacunarity": 0.25, "Gain": 0.25, "Octaves": 2}.items():
-        node.set(name, number)
-        expected.set(name, value)
-    assert np.array_equal(
-        node.gen_position_array_2d(X, Y, SEED), expected.gen_position_array_2d(X, Y, SEED)
-    )
-    node, expected = fn2.Node("CellularDistance"), fn2.Node("CellularDistance")
-    node.set("Distance Function", number)
-    expected.set("Distance Function", "Manhattan")
-    assert np.array_equal(
-        node.gen_position_array_2d(X, Y, SEED), expected.gen_position_array_2d(X, Y, SEED)
-    )
+        expected_fbm.set(name, value)
+    expected_cellular.set("Distance Function", "Manhattan")
+    for node, expected in ((fbm, expected_fbm), (cellular, expected_cellular)):
+        assert np.array_equal(
+            node.gen_position_array_2d(X, Y, SEED), expected.gen_position_array_2d(X, Y, SEED)
+        )
 
 
 def test_hybrid_takes_node_or_float() -> None:
