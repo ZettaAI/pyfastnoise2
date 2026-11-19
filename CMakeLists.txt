@@ -25,6 +25,11 @@ set(FASTNOISE2_TESTS OFF CACHE BOOL "" FORCE)
 set(FASTNOISE2_UTILITY OFF CACHE BOOL "" FORCE)
 # Bit-identical results on every SIMD level and with every compiler.
 set(FASTNOISE2_STRICT_FP ON CACHE BOOL "" FORCE)
+# STRICT_FP takes fused multiply-add away from the x86 code only. arm64 always has it,
+# and compilers contract a * b + c into one by default.
+if(NOT MSVC)
+  add_compile_options(-ffp-contract=off)
+endif()
 
 include(FetchContent)
 # EXCLUDE_FROM_ALL drops FastNoise2's own install rules (headers, CMake package files).
