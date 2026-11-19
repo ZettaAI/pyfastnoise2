@@ -64,6 +64,11 @@ Member values are not range-checked, because FastNoise2 does not limit them: a b
 `Octaves` are accepted and generate practically forever. `Node.from_encoded` refuses a
 damaged string, but a string from an untrusted source can describe such a tree.
 
+Once a process has created a `GeneratorCache` node, every generating call at the SIMD
+level of that node first makes three calls for one value each, about 2 microseconds
+together: they clear the values such a node keeps per thread, which FastNoise2 would
+otherwise return again for a source that has changed or was freed since.
+
 Generating is thread-safe and releases the GIL: any number of threads can generate from
 one tree. Changing a tree is not safe while another thread generates from it: FastNoise2
 reads the members of a node without a lock, and a node that `set` replaces may be freed
