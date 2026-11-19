@@ -203,6 +203,45 @@ def test_simd_levels() -> None:
             fn2.Node("Simplex", max_simd_level=level)
 
 
+def lone_node(node_type: str, max_simd_level: str) -> fn2.Node:
+    """A node of ``node_type`` with its node members set."""
+    node = fn2.Node(node_type, max_simd_level=max_simd_level)
+    for name, member in fn2.members(node_type).items():
+        if name == "Feature Scale":
+            node.set(name, 1.0)
+        if member.kind == "node":
+            source = fn2.Node("Simplex", max_simd_level=max_simd_level)
+            source.set("Feature Scale", 1.0)
+            try:
+                node.set(name, source)
+            except TypeError:
+                warp = fn2.Node("DomainWarpGradient", max_simd_level=max_simd_level)
+                warp.set("Source", source)
+                node.set(name, warp)
+    return node
+
+
+@pytest.mark.parametrize("node_type", fn2.node_types())
+def test_node_type_is_identical_at_every_simd_level(node_type: str) -> None:
+    x, y, z = grid_positions((-3.7, 2.1, 0.4), (8, 8, 4), (0.37, 0.41, 0.53))
+    levels = fn2.simd_levels()
+    expected = lone_node(node_type, levels[-1])
+    for level in levels[:-1]:
+        node = lone_node(node_type, level)
+        assert np.array_equal(
+            node.gen_position_array_2d(x, y, SEED),
+            expected.gen_position_array_2d(x, y, SEED),
+            equal_nan=True,
+        ), level
+        # FastNoise2 1.1.1: AddDimension with 3D positions differs at AVX2 from the SSE levels.
+        if node_type != "AddDimension":
+            assert np.array_equal(
+                node.gen_position_array_3d(x, y, z, SEED),
+                expected.gen_position_array_3d(x, y, z, SEED),
+                equal_nan=True,
+            ), level
+
+
 def test_tree_of_mixed_simd_levels_is_rejected() -> None:
     levels = fn2.simd_levels()
     if levels[0] == levels[-1]:

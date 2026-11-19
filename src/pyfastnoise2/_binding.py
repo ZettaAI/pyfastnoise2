@@ -92,13 +92,14 @@ _INT_MAX: Final = 2**31 - 1
 _MAX_FEATURE_SET: Final = 0xFFFFFFFF
 # FastSIMD::FeatureSet values of the levels FastNoise2 compiles, lowest first, under
 # the names FastSIMD gives them. A level below the lowest one compiled, or one the CPU
-# lacks, crashes the process, so no other value is ever passed to the library.
+# lacks, crashes the process, so no other value is ever passed to the library. The
+# NEON level that arm64 builds also contain is left out: it divides by approximation,
+# so it differs from AARCH64, the level every arm64 CPU runs.
 _FEATURE_SETS: Final = {
     "SSE2": 0x0000E,
     "SSE4.1": 0x0007E,
     "AVX2": 0x003FE,
     "AVX512": 0x03FFE,
-    "NEON": 0x0C000,
     "AARCH64": 0x1C000,
 }
 _FEATURE_SET_NAMES: Final = {value: name for name, value in _FEATURE_SETS.items()}
@@ -215,8 +216,8 @@ def members(node_type: str) -> dict[str, Member]:
 def simd_levels() -> tuple[str, ...]:
     """SIMD levels nodes can run at on this CPU, lowest first. The last is the default.
 
-    FastNoise2 is built so that every level returns bit-identical values: a lower level
-    only costs speed.
+    FastNoise2 is built for bit-identical values at every level, so a lower level only
+    costs speed.
     """
     best = Node(node_types()[0])._feature_set
     return tuple(name for name, value in _FEATURE_SETS.items() if value & best == value)
