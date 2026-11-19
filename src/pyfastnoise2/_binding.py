@@ -682,7 +682,7 @@ class Node:
         else:
             accepted = _lib.fnSetHybridNodeLookup(self._handle, index, source._handle)
         if not accepted:
-            raise TypeError(f"{what} does not accept a {source.node_type} node")
+            raise TypeError(f"{what} does not accept the {source.node_type} node")
         for node, depth in depths.items():
             node._depth = depth
         self._sources[name] = source
