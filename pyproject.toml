@@ -48,8 +48,9 @@ testpaths = ["tests"]
 line-length = 100
 
 [tool.cibuildwheel]
-# The wheel is py3-none: it is built by the first of these and only tested by the second.
-build = ["cp310-*", "cp315-*"]
+# The wheel is py3-none: it is built by the first of these and only tested by the others,
+# of which cp314t is free-threaded.
+build = ["cp310-*", "cp314t-*", "cp315-*"]
 skip = ["*-musllinux_*"]
 archs = ["auto64"]
 manylinux-x86_64-image = "manylinux_2_28"
