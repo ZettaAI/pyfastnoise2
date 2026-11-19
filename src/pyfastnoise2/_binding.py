@@ -91,6 +91,10 @@ for _name, (_restype, _argtypes) in _SIGNATURES.items():
     _function.argtypes = list(_argtypes)
 
 _INT_MAX: Final = 2**31 - 1
+# Nodes in the longest chain of a tree, each a member of the one before. Generating
+# recurses along a chain with up to 8 KiB of native stack per node, so a tree of this
+# depth stays within 1 MiB.
+_MAX_DEPTH: Final = 128
 # FastSIMD::FeatureSet::Max: the best level the CPU supports.
 _MAX_FEATURE_SET: Final = 0xFFFFFFFF
 # FastSIMD::FeatureSet values of the levels FastNoise2 compiles, lowest first, under
@@ -369,6 +373,8 @@ class _EncodedNodeTree:
         # Node ends still to report: one member byte ends several nested nodes.
         self._ends = 0
         self._max_simd_level = max_simd_level
+        # Nodes that are being read: each is a member of the one before.
+        self._open = 0
         # Finished nodes, which later ones refer to by position.
         self._nodes: list[Node] = []
 
@@ -403,6 +409,9 @@ class _EncodedNodeTree:
             position: int = self._read("<H")
             return self._nodes[position]
         metadata = _NODE_TYPES_BY_ID[type_id]
+        self._open += 1
+        if self._open > _MAX_DEPTH:
+            raise ValueError(f"the tree is more than {_MAX_DEPTH} nodes deep")
         node = Node(metadata.name, max_simd_level=self._max_simd_level)
         kind, index = self._member()
         variables = metadata.names("float", "int", "enum")
@@ -428,6 +437,7 @@ class _EncodedNodeTree:
                 raise ValueError(f"unexpected member kind {kind}")
             kind, index = self._member()
         node._ready()
+        self._open -= 1
         self._nodes.append(node)
         return node
 
@@ -440,6 +450,10 @@ class Node:
     with one exception: do not call :meth:`set` on a node while another thread generates
     from a tree that contains it. FastNoise2 reads the members of a node without a lock,
     and a node that :meth:`set` replaces may be freed while that thread still uses it.
+
+    A tree is at most 128 nodes deep, since generating recurses through a chain of
+    members on the native stack: :meth:`set` refuses a member that would make a longer
+    chain. A node counts with the deepest place it has had in any tree.
 
     A node wraps a native handle, so it cannot be pickled or copied: build it in the
     process that uses it. The native node is freed when the node is collected and no
@@ -454,6 +468,7 @@ class Node:
 
     __slots__ = (
         "__weakref__",
+        "_depth",
         "_feature_set",
         "_finalizer",
         "_handle",
@@ -478,6 +493,9 @@ class Node:
         self._feature_set: int = _lib.fnGetActiveFeatureSet(handle)
         # Nodes set as members; the library holds its own references to them.
         self._sources: dict[str, Node] = {}
+        # Place in the longest chain from a root down to this node, over every tree the
+        # node has been in: it only grows, so a member is always deeper than its node.
+        self._depth = 1
         # "node" members not set yet: generating without them crashes.
         self._unset = metadata.names("node")
 
@@ -570,32 +588,38 @@ class Node:
                 f"{what}: set {', '.join(map(repr, source._unset))} of the "
                 f"{source.node_type} node first"
             )
-        if source._depends_on(self):
-            raise ValueError(f"{what}: the {source.node_type} node depends on this node")
+        depths = self._depths_below(source, what)
         if member.kind == "node":
             accepted = _lib.fnSetNodeLookup(self._handle, index, source._handle)
         else:
             accepted = _lib.fnSetHybridNodeLookup(self._handle, index, source._handle)
         if not accepted:
             raise TypeError(f"{what} does not accept a {source.node_type} node")
+        for node, depth in depths.items():
+            node._depth = depth
         self._sources[name] = source
         if name in self._unset:
             self._unset.remove(name)
 
-    def _depends_on(self, node: Node) -> bool:
-        """Whether ``node`` is this node or part of the tree below it. A node that
-        became its own source would recurse without end."""
-        pending = [self]
-        seen = {id(self)}
+    def _depths_below(self, source: Node, what: str) -> dict[Node, int]:
+        """The new depths of the nodes that get deeper when the tree of ``source`` becomes
+        a member of this node. Refuses a tree that contains this node, which would recurse
+        without end, and one that would reach deeper than ``_MAX_DEPTH``."""
+        depths: dict[Node, int] = {}
+        pending = [(source, self._depth + 1)]
         while pending:
-            current = pending.pop()
-            if current is node:
-                return True
-            for source in current._sources.values():
-                if id(source) not in seen:
-                    seen.add(id(source))
-                    pending.append(source)
-        return False
+            node, depth = pending.pop()
+            # Nothing changes for a node that is this deep already, nor below it. It is
+            # deeper than this node then, so this node is not below it either.
+            if depth <= max(node._depth, depths.get(node, 0)):
+                continue
+            if node is self:
+                raise ValueError(f"{what}: the {source.node_type} node depends on this node")
+            depths[node] = depth
+            pending.extend((member, depth + 1) for member in node._sources.values())
+        if max(depths.values(), default=0) > _MAX_DEPTH:
+            raise ValueError(f"{what}: the tree would be more than {_MAX_DEPTH} nodes deep")
+        return depths
 
     def _ready(self) -> int:
         """The handle, once generating from it is safe."""

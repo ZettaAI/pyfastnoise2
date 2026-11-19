@@ -56,7 +56,9 @@ values = fbm.gen_position_array_2d(x, y, seed=1337)  # float32, the shape of x
 one, under FastNoise2's own names. `Node.from_encoded` builds a tree from a string of the
 FastNoise2 Node Editor. Besides `gen_position_array_2d` there are `gen_uniform_grid_2d`,
 `gen_single_2d` and the same three for 3D. The array methods take C-contiguous float32
-arrays and an optional `out`, and raise on anything else.
+arrays and an optional `out`, and raise on anything else. A tree can be up to 128 nodes
+deep: generating recurses through a chain of nodes on the native stack and needs up to
+about 1 MiB of it at that depth.
 
 Generating is thread-safe and releases the GIL: any number of threads can generate from
 one tree. Changing a tree is not safe while another thread generates from it: FastNoise2

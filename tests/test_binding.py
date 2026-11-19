@@ -58,6 +58,8 @@ GOLDEN_3D = np.array(
 ).view(np.float32)  # fmt: skip
 
 NEGATIVE_ZERO = 0x80000000
+# The deepest tree, as the Node docstring and the README state it.
+MAX_DEPTH = 128
 
 # lattice_digest(lone_node(node_type)) of every node type, the same on every platform and
 # at every SIMD level.
@@ -478,6 +480,69 @@ def test_cycle_is_rejected() -> None:
     fbm = simplex_fbm()
     with pytest.raises(ValueError, match="depends on this node"):
         fbm.set("Gain", fbm)
+
+
+def chain(length: int, node_type: str = "Abs", member: str = "Source") -> list[fn2.Node]:
+    """A chain of ``length`` nodes, root first: ``node_type`` nodes above a Simplex node."""
+    nodes = [fn2.Node("Simplex")]
+    for _ in range(length - 1):
+        nodes.insert(0, fn2.Node(node_type))
+        nodes[0].set(member, nodes[1])
+    return nodes
+
+
+def test_depth_limit() -> None:
+    nodes = chain(MAX_DEPTH - 1)
+    # The source of the lowest Abs node becomes a tree of two nodes.
+    nodes[-2].set("Source", simplex_fbm())
+    root = nodes[0]
+    assert np.array_equal(root.gen_position_array_2d(X, Y, SEED), np.abs(GOLDEN_2D))
+    with pytest.raises(ValueError, match="more than 128 nodes deep"):
+        fn2.Node("Abs").set("Source", root)
+    with pytest.raises(ValueError, match="more than 128 nodes deep"):
+        fn2.Node("PowFloat").set("Pow", root)
+    assert np.array_equal(root.gen_position_array_2d(X, Y, SEED), np.abs(GOLDEN_2D))
+
+
+def test_depth_limit_counts_the_nodes_above() -> None:
+    upper, lower = chain(3), chain(MAX_DEPTH - 1)
+    # The two Abs nodes of upper above lower without its root.
+    upper[1].set("Source", lower[1])
+    with pytest.raises(ValueError, match="more than 128 nodes deep"):
+        upper[1].set("Source", lower[0])
+    with pytest.raises(ValueError, match="more than 128 nodes deep"):
+        lower[-2].set("Source", chain(2)[0])
+    # A tree that is too deep because it contains the node is refused for that.
+    with pytest.raises(ValueError, match="depends on this node"):
+        lower[-2].set("Source", upper[0])
+    upper[0].gen_single_2d(0.0, 0.0, SEED)
+
+
+def test_deepest_tree_fits_a_small_stack() -> None:
+    # Cellular nodes with a fourth coordinate, from AddDimension, have the largest stack
+    # frames. The stack is twice what the README names. The values are not looked at:
+    # FastNoise2 1.1.1 returns arbitrary ones for AddDimension at 3D positions at AVX2.
+    shapes: list[tuple[int, ...]] = []
+    previous = threading.stack_size(2 * 1024 * 1024)
+    try:
+        for level in fn2.simd_levels():
+            source = fn2.Node("CellularDistance", max_simd_level=level)
+            for _ in range(MAX_DEPTH - 2):
+                node = fn2.Node("CellularDistance", max_simd_level=level)
+                node.set("Grid Jitter", source)
+                source = node
+            root = fn2.Node("AddDimension", max_simd_level=level)
+            root.set("Source", source)
+            thread = threading.Thread(
+                target=lambda root=root: shapes.append(
+                    root.gen_position_array_3d(X, Y, Z, SEED).shape
+                )
+            )
+            thread.start()
+            thread.join()
+    finally:
+        threading.stack_size(previous)
+    assert shapes == [X.shape] * len(fn2.simd_levels())
 
 
 def test_concurrent_set_cannot_build_a_cycle() -> None:
