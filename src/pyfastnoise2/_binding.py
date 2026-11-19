@@ -225,6 +225,10 @@ def _free_dropped() -> None:
     it lets go."""
     while _dropped and _lock.acquire(blocking=False):
         try:
+            # Another thread may have emptied the queue since the check above. Only the
+            # holder of the lock takes from it.
+            if not _dropped:
+                continue
             handle = _dropped.popleft()
             # The releaser takes its own reference first, so that the node is freed
             # exactly once, also by a FastNoise2 whose fnDeleteNodeRef frees a node

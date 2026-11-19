@@ -15,6 +15,7 @@ import re
 import signal
 import sys
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -720,6 +721,27 @@ def test_collected_nodes_are_freed() -> None:
         assert len(handles) < 5_000, level
     del node
     # Freed when dropped, not by the next call.
+    assert not _binding._dropped
+
+
+@pytest.mark.skipif(
+    getattr(sys, "_is_gil_enabled", lambda: True)(), reason="the interpreter has a GIL"
+)
+def test_threads_drop_nodes_without_a_gil(monkeypatch: pytest.MonkeyPatch) -> None:
+    unraisable: list[BaseException | None] = []
+    # A finalizer, which frees its node, reports an error here.
+    monkeypatch.setattr(sys, "unraisablehook", lambda error: unraisable.append(error.exc_value))
+    deadline = time.monotonic() + 2.0
+
+    def churn() -> None:
+        while time.monotonic() < deadline:
+            fn2.Node("Simplex")
+            simplex_fbm()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for thread in [pool.submit(churn) for _ in range(8)]:
+            thread.result()
+    assert not unraisable
     assert not _binding._dropped
 
 
