@@ -95,6 +95,22 @@ from the math library of the system.
 `fn2.simd_levels()` lists the levels of the machine, `node.simd_level` is the one a node
 runs at, and `fn2.Node(..., max_simd_level="SSE2")` runs a node at a lower one.
 
+## Seeds
+
+FastNoise2 1.1.1 does not read every bit of a seed, and seeds that differ in few bits can
+return related noise. `Simplex`, `SuperSimplex` and `Perlin` read the low 18 bits of the
+seed at 2D positions and the low 19 at 3D positions: `seed` and `seed + 2**18` (`2**19` in
+3D) return bit-identical values. Seeds that differ below that are often correlated at the
+same positions. Measured over 190 x 190 lattice cells, the correlation coefficient of 2D
+`Simplex` was -0.27 to 0.08 for `seed + 1`, up to 0.61 for `seed + 256` and 0.71 for
+`seed + 2**17`; of 300 random pairs of seeds, 4% were beyond 0.1, the largest at 0.21. At
+3D positions it reached 0.53. `Value` reads 31 bits and stayed below 0.07, except for 0.25
+at `seed + 2**30`; `CellularValue` and `CellularDistance` reached 0.72 and 0.94 at
+`seed + 2**24`. Two fields that have to be independent are therefore better kept apart by
+position than by seed alone: with one seed and the positions of the second field shifted
+by 1000 lattice cells through `x_offset`, `Simplex`, `SuperSimplex`, `Perlin` and `Value`
+measured 0.04 at most.
+
 ## Building from source
 
 ```sh
