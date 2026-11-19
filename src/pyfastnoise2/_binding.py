@@ -84,6 +84,7 @@ _SIGNATURES: Final[dict[str, tuple[Any, tuple[Any, ...]]]] = {
     ),
     "fnGenSingle2D": (_FLOAT, (_POINTER, _FLOAT, _FLOAT, _INT)),
     "fnGenSingle3D": (_FLOAT, (_POINTER, _FLOAT, _FLOAT, _FLOAT, _INT)),
+    "fnGenSingle4D": (_FLOAT, (_POINTER, _FLOAT, _FLOAT, _FLOAT, _FLOAT, _INT)),
 }
 for _name, (_restype, _argtypes) in _SIGNATURES.items():
     _function = getattr(_lib, _name)
@@ -265,6 +266,22 @@ _exclusive: Final = _Exclusive()
 os.register_at_fork(before=_lock.acquire, after_in_parent=_unlock, after_in_child=_unlock)
 
 
+# A GeneratorCache node keeps the values of its last batch per thread and returns them
+# again for the same source address, seed and positions: also after the source has
+# changed, or was freed and its address given to another node. Generating from one of
+# these cache nodes, one per SIMD level with a source that no other node has, leaves a
+# thread with a cached address that no other cache node matches.
+_CACHE_TYPE: Final = _NODE_TYPES["GeneratorCache"]
+_cache_resets: Final[dict[int, int]] = {}
+
+
+def _new_cache_reset(feature_set: int) -> int:
+    reset: int = _lib.fnNewFromMetadata(_CACHE_TYPE.type_id, feature_set)
+    source = _lib.fnNewFromMetadata(_NODE_TYPES["Constant"].type_id, feature_set)
+    _lib.fnSetNodeLookup(reset, _CACHE_TYPE.indices["Source"], source)
+    return reset
+
+
 def node_types() -> tuple[str, ...]:
     """Names of FastNoise2's node types, such as ``"Simplex"`` and ``"FractalFBm"``."""
     return tuple(_NODE_TYPES)
@@ -436,7 +453,7 @@ class _EncodedNodeTree:
             else:
                 raise ValueError(f"unexpected member kind {kind}")
             kind, index = self._member()
-        node._ready()
+        node._require_members()
         self._open -= 1
         self._nodes.append(node)
         return node
@@ -491,6 +508,10 @@ class Node:
         self._finalizer.atexit = False
         self._type = metadata
         self._feature_set: int = _lib.fnGetActiveFeatureSet(handle)
+        if metadata is _CACHE_TYPE:
+            with _exclusive:
+                if self._feature_set not in _cache_resets:
+                    _cache_resets[self._feature_set] = _new_cache_reset(self._feature_set)
         # Nodes set as members; the library holds its own references to them.
         self._sources: dict[str, Node] = {}
         # Place in the longest chain from a root down to this node, over every tree the
@@ -621,13 +642,23 @@ class Node:
             raise ValueError(f"{what}: the tree would be more than {_MAX_DEPTH} nodes deep")
         return depths
 
-    def _ready(self) -> int:
-        """The handle, once generating from it is safe."""
+    def _require_members(self) -> None:
         if self._unset:
             raise RuntimeError(
                 f"set {', '.join(map(repr, self._unset))} of the {self.node_type} node "
                 "before generating"
             )
+
+    def _ready(self) -> int:
+        """The handle, once generating from it is safe."""
+        self._require_members()
+        if _cache_resets:
+            reset = _cache_resets.get(self._feature_set)
+            if reset is not None:
+                # One cache per number of coordinates; AddDimension reaches the higher.
+                _lib.fnGenSingle2D(reset, 0.0, 0.0, 0)
+                _lib.fnGenSingle3D(reset, 0.0, 0.0, 0.0, 0)
+                _lib.fnGenSingle4D(reset, 0.0, 0.0, 0.0, 0.0, 0)
         return self._handle
 
     def gen_uniform_grid_2d(

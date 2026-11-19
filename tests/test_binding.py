@@ -636,6 +636,57 @@ def test_node_outlives_the_trees_it_was_in() -> None:
     assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
 
 
+def cached_simplex(feature_scale: float, level: str | None = None) -> tuple[fn2.Node, fn2.Node]:
+    """A GeneratorCache node and its Simplex source."""
+    source = fn2.Node("Simplex", max_simd_level=level)
+    source.set("Feature Scale", feature_scale)
+    cache = fn2.Node("GeneratorCache", max_simd_level=level)
+    cache.set("Source", source)
+    return cache, source
+
+
+def test_generator_cache_follows_its_source() -> None:
+    # One position again and again: the first batch of a call then equals the last batch
+    # of the call before, which is what the cache compares.
+    x, y, z = (np.full(96, value, dtype=np.float32) for value in (0.25, -0.5, 0.75))
+
+    def values(node: fn2.Node) -> list[Any]:
+        return [
+            node.gen_single_2d(0.25, -0.5, SEED),
+            node.gen_single_3d(0.25, -0.5, 0.75, SEED),
+            node.gen_position_array_2d(x, y, SEED).tolist(),
+            node.gen_position_array_3d(x, y, z, SEED).tolist(),
+        ]
+
+    for level in fn2.simd_levels():
+        cache, source = cached_simplex(1.0, level)
+        expected = [values(cached_simplex(scale, level)[1]) for scale in (1.0, 3.0)]
+        assert expected[0] != expected[1]
+        assert values(cache) == expected[0]
+        source.set("Feature Scale", 3.0)
+        assert values(cache) == expected[1]
+
+    # With a coordinate added above the cache. FastNoise2 1.1.1 returns arbitrary values
+    # for AddDimension at 3D positions at AVX2, so that case runs at the lowest level.
+    level = fn2.simd_levels()[0]
+    cache, source = cached_simplex(1.0, level)
+    wider = fn2.Node("AddDimension", max_simd_level=level)
+    wider.set("Source", cache)
+    before = values(wider)
+    source.set("Feature Scale", 3.0)
+    after = values(wider)
+    assert all(old != new for old, new in zip(before, after, strict=True))
+
+
+def test_generator_cache_does_not_return_values_of_a_freed_node() -> None:
+    # A source mostly gets the address of the one freed just before it.
+    scales = np.random.default_rng(0).uniform(0.5, 5.0, 3_000).tolist()
+    for scale in scales:
+        cache, source = cached_simplex(scale)
+        assert cache.gen_single_2d(0.25, -0.5, SEED) == source.gen_single_2d(0.25, -0.5, SEED)
+        del cache, source
+
+
 def test_node_is_not_picklable_or_copyable() -> None:
     node = simplex_fbm()
     for duplicate in (pickle.dumps, copy.copy, copy.deepcopy):
