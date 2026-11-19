@@ -105,6 +105,10 @@ checkouts with `-C cmake.define.FETCHCONTENT_SOURCE_DIR_FASTNOISE2=<dir>` and
 The build refuses GCC, because FastNoise2 built with GCC 11 ran 1.8 times slower than
 built with Clang 14. `-C cmake.define.PYFASTNOISE2_ALLOW_GCC=ON` builds with it anyway.
 
+If Clang reports `cannot find -lstdc++`, it uses the directories of the newest GCC on the
+machine, which lacks its C++ library: install the `libstdc++-N-dev` package of that GCC
+version, `libstdc++-12-dev` next to `gcc-12`.
+
 Run the tests against the installed package with `pip install pytest && pytest`.
 
 The version is the version of FastNoise2; a release that only changes the packaging is
