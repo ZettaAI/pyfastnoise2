@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+wheelhouse/
+_skbuild/

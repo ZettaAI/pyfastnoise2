@@ -1,0 +1,66 @@
+[build-system]
+requires = ["scikit-build-core>=1.1"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pyfastnoise2"
+# The FastNoise2 version; packaging-only revisions are 1.1.1.postN.
+version = "1.1.1"
+description = "FastNoise2 SIMD noise as Python wheels with a thin ctypes binding"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "LICENSES/*"]
+authors = [{ name = "Zetta AI" }]
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+keywords = ["noise", "simplex", "perlin", "fbm", "simd", "procedural"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/ZettaAI/pyfastnoise2"
+FastNoise2 = "https://github.com/Auburn/FastNoise2"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.28"
+# The binding is ctypes only, so one wheel per platform serves every Python version.
+wheel.py-api = "py3"
+wheel.packages = ["src/pyfastnoise2"]
+sdist.exclude = [".github"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.cibuildwheel]
+# The wheel is py3-none: it is built by the first of these and only tested by the second.
+build = ["cp310-*", "cp315-*"]
+skip = ["*-musllinux_*"]
+archs = ["auto64"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+build-verbosity = 1
+test-requires = ["pytest"]
+test-command = "pytest {project}/tests"
+
+[tool.cibuildwheel.linux]
+before-all = "dnf install -y clang"
+environment = { CC = "clang", CXX = "clang++" }
+
+[tool.cibuildwheel.macos]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
