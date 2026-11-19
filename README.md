@@ -60,6 +60,10 @@ arrays and an optional `out`, and raise on anything else. A tree can be up to 12
 deep: generating recurses through a chain of nodes on the native stack and needs up to
 about 1 MiB of it at that depth.
 
+Member values are not range-checked, because FastNoise2 does not limit them: a billion
+`Octaves` are accepted and generate practically forever. `Node.from_encoded` refuses a
+damaged string, but a string from an untrusted source can describe such a tree.
+
 Generating is thread-safe and releases the GIL: any number of threads can generate from
 one tree. Changing a tree is not safe while another thread generates from it: FastNoise2
 reads the members of a node without a lock, and a node that `set` replaces may be freed

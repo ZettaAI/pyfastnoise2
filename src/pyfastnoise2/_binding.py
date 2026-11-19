@@ -536,6 +536,10 @@ class Node:
 
         The string holds node type ids, which belong to a FastNoise2 version: decode
         strings of the version this package is built from.
+
+        A damaged string is refused, but member values are taken as they are, since
+        FastNoise2 does not limit them: a string from an untrusted source can describe a
+        tree that takes practically forever to generate, with a billion octaves for one.
         """
         if not isinstance(encoded, str):
             raise TypeError(f"encoded must be a str, not {type(encoded).__name__}")
