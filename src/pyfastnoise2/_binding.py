@@ -512,10 +512,13 @@ class Node:
         feature_set = _max_feature_set(max_simd_level)
         with _exclusive:
             handle = _lib.fnNewFromMetadata(metadata.type_id, feature_set)
+            if handle:
+                # Before the lock is let go: no error on the way out of here may leave
+                # the native node without the finalizer that frees it.
+                self._finalizer = weakref.finalize(self, _drop, handle)
         if not handle:
             raise RuntimeError(f"FastNoise2 did not create a {node_type} node")
         self._handle: int = handle
-        self._finalizer = weakref.finalize(self, _drop, handle)
         # Not at interpreter exit: a daemon thread may still be generating from the node,
         # and the memory goes back to the system with the process.
         self._finalizer.atexit = False

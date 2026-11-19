@@ -745,6 +745,30 @@ def test_threads_drop_nodes_without_a_gil(monkeypatch: pytest.MonkeyPatch) -> No
     assert not _binding._dropped
 
 
+def test_node_whose_creation_fails_late_is_freed(monkeypatch: pytest.MonkeyPatch) -> None:
+    freed: list[int] = []
+    drop = _binding._drop
+
+    def record(handle: int) -> None:
+        freed.append(handle)
+        drop(handle)
+
+    def fail() -> None:
+        raise MemoryError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_binding, "_drop", record)
+        # Runs when Node() lets go of the lock, after it has created the native node.
+        patch.setattr(_binding, "_free_dropped", fail)
+        with pytest.raises(MemoryError) as raised:
+            fn2.Node("Simplex")
+    # The traceback kept the node alive.
+    del raised
+    gc.collect()
+    assert len(freed) == 1
+    assert not _binding._dropped
+
+
 def test_node_replaced_as_a_member_is_freed() -> None:
     node = fn2.Node("Abs")
     node.set("Source", simplex_fbm())
