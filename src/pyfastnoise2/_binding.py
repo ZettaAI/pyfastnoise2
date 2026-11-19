@@ -331,7 +331,10 @@ def _c_int(name: str, value: Any, lowest: int = -_INT_MAX - 1) -> int:
 def _c_float(name: str, value: Any) -> float:
     if not isinstance(value, numbers.Real):
         raise TypeError(f"{name} must be a real number, not {type(value).__name__}")
-    return float(value)
+    try:
+        return float(value)
+    except OverflowError:
+        raise ValueError(f"{name} is beyond the range of a float") from None
 
 
 def _float32_array(name: str, array: Any) -> Float32Array:
