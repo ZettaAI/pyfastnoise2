@@ -8,7 +8,9 @@ import hashlib
 import importlib.metadata
 import os
 import pickle
+import signal
 import sys
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
@@ -18,6 +20,7 @@ import numpy.typing as npt
 import pytest
 
 import pyfastnoise2 as fn2
+from pyfastnoise2 import _binding
 
 SEED = 1337
 # Five octaves with gain 0.5 sum to at most 1 + 0.5 + ... + 0.5**4 times the source.
@@ -490,15 +493,48 @@ def test_source_deleted_before_use() -> None:
     assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
 
 
-def test_handle_is_released_on_deletion() -> None:
-    node = simplex_fbm()
-    finalizers = [node._finalizer, node._sources["Source"]._finalizer]
-    assert all(finalizer.alive for finalizer in finalizers)
+def test_collected_nodes_are_freed() -> None:
+    # FastNoise2 gives the memory of a freed node to a later one, so the handles of
+    # dropped trees repeat. Unfreed, the trees below would have 20,000 handles per level.
+    for level in fn2.simd_levels():
+        handles = set()
+        for _ in range(10_000):
+            node = simplex_fbm(level)
+            handles |= {node._handle, node._sources["Source"]._handle}
+        assert len(handles) < 5_000, level
     del node
-    gc.collect()
-    assert not any(finalizer.alive for finalizer in finalizers)
-    for _ in range(10_000):
-        simplex_fbm()
+    # Freed when dropped, not by the next call.
+    assert not _binding._dropped
+
+
+def test_node_outlives_the_trees_it_was_in() -> None:
+    def churn() -> None:
+        """Collect what was dropped and hand its memory to other nodes."""
+        gc.collect()
+        for _ in range(2_000):
+            mixed_tree()
+
+    node = simplex_fbm()
+    gain = fn2.Node("Constant")
+    gain.set("Value", 0.25)
+
+    parent = fn2.Node("Abs")
+    parent.set("Source", node)
+    del parent
+    churn()
+    assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
+
+    parent = fn2.Node("Abs")
+    parent.set("Source", node)
+    parent.set("Source", fn2.Node("Simplex"))
+    churn()
+    assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
+
+    node.set("Gain", gain)
+    node.set("Gain", 0.5)
+    churn()
+    assert gain.gen_single_2d(0.0, 0.0, SEED) == 0.25
+    assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
 
 
 def test_node_is_not_picklable_or_copyable() -> None:
@@ -566,6 +602,8 @@ def test_node_survives_fork() -> None:
     if pid == 0:
         status = 1
         try:
+            # Ends a child that waits for a lock.
+            signal.alarm(10)
             os.close(read_end)
             values = node.gen_position_array_2d(X, Y, SEED)
             # The child owns a copy of the node: it can release it and build new ones.
@@ -582,6 +620,35 @@ def test_node_survives_fork() -> None:
     assert os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) == 0
     assert received == GOLDEN_2D.tobytes() + GOLDEN_3D.tobytes()
     assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="fork without exec is only safe on Linux")
+@pytest.mark.filterwarnings("ignore:.*multi-threaded.*fork:DeprecationWarning")
+def test_fork_while_a_thread_builds_nodes() -> None:
+    stop = threading.Event()
+
+    def build() -> None:
+        while not stop.is_set():
+            simplex_fbm()
+
+    thread = threading.Thread(target=build)
+    thread.start()
+    try:
+        for _ in range(50):
+            pid = os.fork()
+            if pid == 0:
+                status = 1
+                try:
+                    # Ends a child that waits for a lock the other thread held when it forked.
+                    signal.alarm(10)
+                    if simplex_fbm().gen_single_2d(0.25, -0.5, SEED) == GOLDEN_2D[1]:
+                        status = 0
+                finally:
+                    os._exit(status)
+            assert os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) == 0
+    finally:
+        stop.set()
+        thread.join()
 
 
 def test_distribution_ships_all_licenses() -> None:

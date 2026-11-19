@@ -7,11 +7,14 @@ import ctypes
 import math
 import numbers
 import operator
+import os
 import re
 import string
 import struct
 import sys
+import threading
 import weakref
+from collections import deque
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -198,6 +201,65 @@ def _node_type(name: str) -> _NodeType:
     return node_type
 
 
+# Held for every native call that allocates or frees nodes: the node pools of FastNoise2
+# do not survive a free next to another allocation or free.
+_lock: Final = threading.Lock()
+# Handles of collected nodes that are still to be freed. A finalizer only queues its
+# handle here: the collector runs it anywhere, also inside a section that holds the lock.
+_dropped: Final[deque[int]] = deque()
+# fnDeleteNodeRef gives a reference back without freeing the node, which FastNoise2 only
+# does when another node lets go of it. This node, never generated from, takes each
+# dropped node as a member for that.
+_RELEASER_TYPE: Final = _NODE_TYPES["Add"]
+_RELEASER: Final[int] = _lib.fnNewFromMetadata(_RELEASER_TYPE.type_id, _MAX_FEATURE_SET)
+_RELEASER_MEMBER: Final = _RELEASER_TYPE.indices["RHS"]
+
+
+def _free_dropped() -> None:
+    """Free the nodes in ``_dropped``, unless the lock is held: its holder frees them when
+    it lets go."""
+    while _dropped and _lock.acquire(blocking=False):
+        try:
+            handle = _dropped.popleft()
+            # The releaser takes its own reference first, so that the node is freed
+            # exactly once, also by a FastNoise2 whose fnDeleteNodeRef frees a node
+            # nothing refers to anymore.
+            _lib.fnSetHybridNodeLookup(_RELEASER, _RELEASER_MEMBER, handle)
+            _lib.fnDeleteNodeRef(handle)
+            _lib.fnSetHybridFloat(_RELEASER, _RELEASER_MEMBER, 0.0)
+        finally:
+            _lock.release()
+
+
+def _drop(handle: int) -> None:
+    """Finalizer of a :class:`Node`."""
+    _dropped.append(handle)
+    _free_dropped()
+
+
+def _unlock() -> None:
+    """Release the lock and free the nodes dropped while it was held."""
+    _lock.release()
+    _free_dropped()
+
+
+class _Exclusive:
+    """Context that holds the lock."""
+
+    def __enter__(self) -> None:
+        _lock.acquire()
+
+    def __exit__(self, *error: object) -> None:
+        _unlock()
+
+
+_exclusive: Final = _Exclusive()
+
+# A child forked while another thread is inside such a section would inherit the lock as
+# held, and the node pools in the middle of a call.
+os.register_at_fork(before=_lock.acquire, after_in_parent=_unlock, after_in_child=_unlock)
+
+
 def node_types() -> tuple[str, ...]:
     """Names of FastNoise2's node types, such as ``"Simplex"`` and ``"FractalFBm"``."""
     return tuple(_NODE_TYPES)
@@ -376,9 +438,10 @@ class Node:
     :meth:`set` while another thread generates from a tree that contains it is not.
 
     A node wraps a native handle, so it cannot be pickled or copied: build it in the
-    process that uses it. It does survive ``os.fork()``. Parent and child then each own
-    an independent copy, and FastNoise2 holds no threads or file descriptors. As with
-    ``malloc``, do not fork while another thread creates or deletes nodes.
+    process that uses it. The native node is freed when the node is collected and no
+    other node has it as a member: a tree keeps the nodes it is built from. A node does
+    survive ``os.fork()``. Parent and child then each own an independent copy, and
+    FastNoise2 holds no threads or file descriptors.
 
     :param node_type: One of :func:`node_types`.
     :param max_simd_level: One of :func:`simd_levels`, to run this node below the best
@@ -397,12 +460,16 @@ class Node:
 
     def __init__(self, node_type: str, *, max_simd_level: str | None = None) -> None:
         metadata = _node_type(node_type)
-        handle = _lib.fnNewFromMetadata(metadata.type_id, _max_feature_set(max_simd_level))
+        feature_set = _max_feature_set(max_simd_level)
+        with _exclusive:
+            handle = _lib.fnNewFromMetadata(metadata.type_id, feature_set)
         if not handle:
             raise RuntimeError(f"FastNoise2 did not create a {node_type} node")
         self._handle: int = handle
-        # Releases this reference when the node is collected, or at interpreter exit.
-        self._finalizer = weakref.finalize(self, _lib.fnDeleteNodeRef, handle)
+        self._finalizer = weakref.finalize(self, _drop, handle)
+        # Not at interpreter exit: a daemon thread may still be generating from the node,
+        # and the memory goes back to the system with the process.
+        self._finalizer.atexit = False
         self._type = metadata
         self._feature_set: int = _lib.fnGetActiveFeatureSet(handle)
         # Nodes set as members; the library holds its own references to them.
