@@ -6,6 +6,7 @@ import copy
 import gc
 import hashlib
 import importlib.metadata
+import itertools
 import os
 import pickle
 import signal
@@ -61,6 +62,24 @@ NEGATIVE_ZERO = 0x80000000
 # The deepest tree, as the Node docstring and the README state it.
 MAX_DEPTH = 128
 
+# Members with which a node of these types is neither constant nor a copy of its source.
+# DomainRotate takes the sines and cosines of its angles from the math library of the
+# system. Those of these three float32 angles are each within 0.005 ULP of a float32, so
+# every library that is accurate to 0.99 ULP returns the same six values. Each fused
+# multiply-add a compiler makes of the rotation matrix changes the matrix for them.
+LONE_NODE_MEMBERS: dict[str, dict[str, float]] = {
+    "Gradient": {"X Multiplier": 1.37, "Y Multiplier": -0.73, "Z Multiplier": 0.41},
+    "DomainScale": {"Scaling": 1.37},
+    "DomainOffset": {"X Offset": 0.31, "Y Offset": -0.57, "Z Offset": 0.83},
+    "DomainRotate": {
+        "Yaw": 0.8332262635231018,
+        "Pitch": 0.9995752573013306,
+        "Roll": 0.9233737587928772,
+    },
+    "DomainAxisScale": {"X Scaling": 1.37, "Y Scaling": 0.73, "Z Scaling": 1.19},
+    "Fade": {"Fade": 0.37},
+}
+
 # lattice_digest(lone_node(node_type)) of every node type, the same on every platform and
 # at every SIMD level.
 GOLDEN_DIGESTS = {
@@ -68,7 +87,7 @@ GOLDEN_DIGESTS = {
     "White": "32de67f7b31ca1b3",
     "Checkerboard": "4badd1e8307ad842",
     "SineWave": "ceb40b0a84ac4658",
-    "Gradient": "e5a00aa9991ac8a5",
+    "Gradient": "f73fb343d4c680e7",
     "DistanceToPoint": "0113762fdb558d2a",
     "Simplex": "9ddce4109cea39b0",
     "SuperSimplex": "472d232338bf68de",
@@ -95,16 +114,16 @@ GOLDEN_DIGESTS = {
     "MinSmooth": "e5d7ad57ed121585",
     "MaxSmooth": "c968e53e8ef74ed6",
     "SignedSquareRoot": "f733a9d3c3a23f26",
-    "PowFloat": "c1ef1bf1d7bf8161",
+    "PowFloat": "b09352a6f628a9b5",
     "PowInt": "60bb5e62f58b40d4",
-    "DomainScale": "9ddce4109cea39b0",
-    "DomainOffset": "9ddce4109cea39b0",
-    "DomainRotate": "9ddce4109cea39b0",
-    "DomainAxisScale": "9ddce4109cea39b0",
+    "DomainScale": "4b3359f28644a01c",
+    "DomainOffset": "4bde93a02c86b415",
+    "DomainRotate": "d659c0a382dd2591",
+    "DomainAxisScale": "38d7b9593dfdb287",
     "SeedOffset": "2aadd9127526a013",
     "ConvertRGBA8": "502f677b198142c7",
     "GeneratorCache": "9ddce4109cea39b0",
-    "Fade": "9ddce4109cea39b0",
+    "Fade": "70a012ce17aaaee0",
     "Remap": "87639f7fbdf4339a",
     "Terrace": "cadf6d7ad0075962",
     "AddDimension": "162eb45ad62fd7ea",
@@ -268,10 +287,13 @@ def test_simd_levels() -> None:
 
 def lone_node(node_type: str, max_simd_level: str | None = None) -> fn2.Node:
     """A node of ``node_type`` that has its node members set and is not constant."""
+    seed_offsets = itertools.count()
 
     def source() -> fn2.Node:
         simplex = fn2.Node("Simplex", max_simd_level=max_simd_level)
         simplex.set("Feature Scale", 1.0)
+        # Each source of a node has its own values.
+        simplex.set("Seed Offset", next(seed_offsets))
         return simplex
 
     node = fn2.Node(node_type, max_simd_level=max_simd_level)
@@ -280,13 +302,17 @@ def lone_node(node_type: str, max_simd_level: str | None = None) -> fn2.Node:
             node.set(name, 1.0)
         elif name == "RHS":
             node.set(name, 0.37)
-        elif member.kind == "node" or name == "LHS":
+        # PowFloat is constant unless one of its two hybrid members is a node.
+        elif member.kind == "node" or name == "LHS" or (node_type, name) == ("PowFloat", "Pow"):
+            simplex = source()
             try:
-                node.set(name, source())
+                node.set(name, simplex)
             except TypeError:
                 warp = fn2.Node("DomainWarpGradient", max_simd_level=max_simd_level)
-                warp.set("Source", source())
+                warp.set("Source", simplex)
                 node.set(name, warp)
+    for name, value in LONE_NODE_MEMBERS.get(node_type, {}).items():
+        node.set(name, value)
     return node
 
 
@@ -307,6 +333,33 @@ def lattice_digest(node: fn2.Node) -> str:
 def test_node_type_at_every_simd_level(node_type: str) -> None:
     for level in fn2.simd_levels():
         assert lattice_digest(lone_node(node_type, level)) == GOLDEN_DIGESTS[node_type], level
+
+
+def test_golden_digests_tell_the_node_types_apart() -> None:
+    digests = dict(GOLDEN_DIGESTS)
+    # A cache returns the values of its source.
+    assert digests.pop("GeneratorCache") == digests["Simplex"]
+    assert len(set(digests.values())) == len(digests)
+    x, y, _ = grid_positions((-3.7, 2.1, 0.4), (8, 8, 4), (0.37, 0.41, 0.53))
+    for node_type in set(digests) - {"Constant"}:
+        values = lone_node(node_type).gen_position_array_2d(x, y, SEED)
+        assert len(np.unique(values.view(np.uint32))) > 1, node_type
+
+
+def test_generator_cache_returns_the_values_of_its_source() -> None:
+    x, y, z = grid_positions((-3.7, 2.1, 0.4), (8, 8, 4), (0.37, 0.41, 0.53))
+    for level in fn2.simd_levels():
+        source = lone_node("Simplex", level)
+        cache = fn2.Node("GeneratorCache", max_simd_level=level)
+        cache.set("Source", source)
+        # The second use of the cache at a position takes the values kept by the first.
+        twice = fn2.Node("Add", max_simd_level=level)
+        twice.set("LHS", cache)
+        twice.set("RHS", cache)
+        once = source.gen_position_array_2d(x, y, SEED)
+        assert np.array_equal(twice.gen_position_array_2d(x, y, SEED), once + once)
+        once = source.gen_position_array_3d(x, y, z, SEED)
+        assert np.array_equal(twice.gen_position_array_3d(x, y, z, SEED), once + once)
 
 
 def test_tree_of_mixed_simd_levels_is_rejected() -> None:
