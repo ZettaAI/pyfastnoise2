@@ -43,6 +43,8 @@ sdist.exclude = [".github"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# An exception in a finalizer or a thread only surfaces as a warning.
+filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 100
