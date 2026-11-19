@@ -16,7 +16,6 @@ import threading
 import weakref
 from collections import deque
 from dataclasses import dataclass
-from functools import cache
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, NoReturn, Union
 
@@ -296,23 +295,30 @@ def members(node_type: str) -> dict[str, Member]:
     return dict(_node_type(node_type).members)
 
 
-@cache
+def _levels_within(feature_set: int) -> tuple[str, ...]:
+    """Names of the levels that use no CPU feature beyond those of ``feature_set``."""
+    return tuple(name for name, value in _FEATURE_SETS.items() if value & feature_set == value)
+
+
+# The releaser runs at the level FastSIMD picks for this CPU.
+_SIMD_LEVELS: Final = _levels_within(_lib.fnGetActiveFeatureSet(_RELEASER))
+
+
 def simd_levels() -> tuple[str, ...]:
     """SIMD levels nodes can run at on this CPU, lowest first. The last is the default.
 
     FastNoise2 is built to return the same values at every level, so a lower level only
     costs speed.
     """
-    best = Node(node_types()[0])._feature_set
-    return tuple(name for name, value in _FEATURE_SETS.items() if value & best == value)
+    return _SIMD_LEVELS
 
 
 def _max_feature_set(max_simd_level: str | None) -> int:
     if max_simd_level is None:
         return _MAX_FEATURE_SET
-    if max_simd_level not in simd_levels():
+    if max_simd_level not in _SIMD_LEVELS:
         raise ValueError(
-            f"max_simd_level must be one of {simd_levels()} on this CPU, not {max_simd_level!r}"
+            f"max_simd_level must be one of {_SIMD_LEVELS} on this CPU, not {max_simd_level!r}"
         )
     return _FEATURE_SETS[max_simd_level]
 

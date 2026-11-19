@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import gc
 import hashlib
@@ -9,11 +10,14 @@ import importlib.metadata
 import itertools
 import os
 import pickle
+import platform
+import re
 import signal
 import sys
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -264,6 +268,27 @@ def test_hybrid_takes_node_or_float() -> None:
     assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), expected)
 
 
+def test_hybrid_set_to_a_float_lets_go_of_its_node() -> None:
+    node = simplex_fbm()
+    gain = fn2.Node("Add")
+    gain.set("LHS", fn2.Node("Simplex"))
+    node.set("Gain", gain)
+    with pytest.raises(ValueError, match="depends on this node"):
+        gain.set("RHS", node)
+    node.set("Gain", 0.5)
+    gain.set("RHS", node)
+    assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
+    gain.gen_single_2d(0.0, 0.0, SEED)
+
+
+def test_extreme_integers() -> None:
+    node = fn2.Node("Simplex")
+    for value in (-(2**31), 2**31 - 1):
+        node.set("Seed Offset", value)
+        assert np.isfinite(node.gen_single_2d(0.5, 0.5, value))
+        assert np.isfinite(node.gen_position_array_3d(X, Y, Z, value)).all()
+
+
 def test_golden_values() -> None:
     node = simplex_fbm()
     assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), GOLDEN_2D)
@@ -283,6 +308,40 @@ def test_simd_levels() -> None:
     for level in ("SCALAR", "AVX", "nope"):
         with pytest.raises(ValueError, match="max_simd_level"):
             fn2.Node("Simplex", max_simd_level=level)
+
+
+def test_default_level_is_the_best_of_the_cpu() -> None:
+    if platform.machine() in ("arm64", "aarch64"):
+        best = "AARCH64"
+    elif sys.platform == "linux":
+        flags = re.search(r"^flags\s*:(.*)$", Path("/proc/cpuinfo").read_text(), re.MULTILINE)
+        assert flags is not None
+        best = "SSE2"
+        # The CPU features FastSIMD asks for, from level to level.
+        for level, features in {
+            "SSE4.1": {"pni", "ssse3", "sse4_1"},
+            "AVX2": {"sse4_2", "popcnt", "xsave", "avx", "avx2"},
+            "AVX512": {"avx512f", "avx512vl", "avx512dq", "avx512bw"},
+        }.items():
+            if not features <= set(flags[1].split()):
+                break
+            best = level
+    else:
+        pytest.skip("no list of the CPU features of this machine")
+    assert fn2.simd_levels()[-1] == best
+    assert fn2.Node("Simplex").simd_level == best
+
+
+def test_levels_of_a_feature_set() -> None:
+    # FastSIMD::FeatureSet values of an SSE2, an SSE4.2, an AVX2, an AVX-512 and an arm64 CPU.
+    for feature_set, levels in {
+        0x0000E: ("SSE2",),
+        0x000FE: ("SSE2", "SSE4.1"),
+        0x003FE: ("SSE2", "SSE4.1", "AVX2"),
+        0x03FFE: ("SSE2", "SSE4.1", "AVX2", "AVX512"),
+        0x1C000: ("AARCH64",),
+    }.items():
+        assert _binding._levels_within(feature_set) == levels
 
 
 def lone_node(node_type: str, max_simd_level: str | None = None) -> fn2.Node:
@@ -386,8 +445,10 @@ def test_position_array_offsets() -> None:
     shifted = node.gen_position_array_2d(X, Y, SEED, x_offset=0.5, y_offset=-2.0)
     expected = node.gen_position_array_2d(X + np.float32(0.5), Y - np.float32(2.0), SEED)
     assert np.array_equal(shifted, expected)
-    shifted = node.gen_position_array_3d(X, Y, Z, SEED, z_offset=0.25)
-    expected = node.gen_position_array_3d(X, Y, Z + np.float32(0.25), SEED)
+    shifted = node.gen_position_array_3d(X, Y, Z, SEED, x_offset=0.5, y_offset=-2.0, z_offset=0.25)
+    expected = node.gen_position_array_3d(
+        X + np.float32(0.5), Y - np.float32(2.0), Z + np.float32(0.25), SEED
+    )
     assert np.array_equal(shifted, expected)
 
 
@@ -662,6 +723,19 @@ def test_collected_nodes_are_freed() -> None:
     assert not _binding._dropped
 
 
+def test_node_replaced_as_a_member_is_freed() -> None:
+    node = fn2.Node("Abs")
+    node.set("Source", simplex_fbm())
+    # Nothing else refers to the first source, so its two nodes are dropped inside set(),
+    # which holds the lock the frees need.
+    node.set("Source", simplex_fbm())
+    assert not _binding._dropped
+    node = simplex_fbm()
+    node.set("Gain", fn2.Node("Constant"))
+    node.set("Gain", 0.5)
+    assert not _binding._dropped
+
+
 def test_node_outlives_the_trees_it_was_in() -> None:
     def churn() -> None:
         """Collect what was dropped and hand its memory to other nodes."""
@@ -786,11 +860,62 @@ def test_from_encoded() -> None:
         "DQAF@BC1Y@ACAP0AIIQS/GAghBD8M",
         "LsOu5azZCwqA3Obc4ipLnkNH",
         "HUzBD47vzdHu7qm0Ri2IJcqYzH5lenpj0HAB2EYdNK8R",
+        pytest.param("DQAF@!", id="run of a character outside the alphabet"),
+        pytest.param("/g==", id="unknown node type"),
+        pytest.param("/wAA", id="reference to a node that is not there"),
+        pytest.param("BvgAAIA/BA==", id="variable index beyond the node type"),
+        pytest.param("KAAHAAAAEQYEBgQE", id="enum value beyond its options"),
+        pytest.param("DREGBAQ=", id="more node members than the node type has"),
+        pytest.param("EwkGBAQ=", id="node member of the wrong node type"),
+        pytest.param("DQQ=", id="node member left unset"),
+        pytest.param("DQkGBPsAAIA/BA==", id="hybrid index beyond the node type"),
+        pytest.param("BgUE", id="unknown member kind"),
+        pytest.param("KBEGDAYE", id="a node follows the end of its parent"),
+        pytest.param("Bgw=", id="the root ends more nodes than there are"),
     ],
 )
 def test_from_encoded_rejects(encoded: str) -> None:
     with pytest.raises(ValueError, match="not a FastNoise2 node tree"):
         fn2.Node.from_encoded(encoded)
+
+
+def test_from_encoded_rejects_other_arguments() -> None:
+    with pytest.raises(TypeError, match="encoded must be a str"):
+        fn2.Node.from_encoded(FBM_ENCODED.encode())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="^max_simd_level must be one of"):
+        fn2.Node.from_encoded(FBM_ENCODED, max_simd_level="AVX")
+
+
+def test_from_encoded_depth_limit() -> None:
+    # Member bytes in the layout of FastNoise2.
+    one_node_member, first_hybrid_node, node_end = 1 | 1 << 3, 2, 4
+    abs_id, add_id, simplex_id = (
+        fn2.node_types().index(name) for name in ("Abs", "Add", "Simplex")
+    )
+
+    def chain(depth: int) -> str:
+        """A chain of Abs nodes above a Simplex node."""
+        nodes = [abs_id, one_node_member] * (depth - 1) + [simplex_id] + [node_end] * depth
+        return base64.b64encode(bytes(nodes)).decode()
+
+    def sums(depth: int) -> list[int]:
+        """Add nodes above ``2 ** (depth - 1)`` Simplex nodes."""
+        if depth == 1:
+            return [simplex_id, node_end]
+        lower = sums(depth - 1)
+        return [add_id, one_node_member, *lower, first_hybrid_node, *lower, node_end]
+
+    simplex = fn2.Node("Simplex").gen_position_array_2d(X, Y, SEED)
+    node = fn2.Node.from_encoded(chain(MAX_DEPTH))
+    assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), np.abs(simplex))
+    with pytest.raises(ValueError, match="more than 128 nodes deep"):
+        fn2.Node.from_encoded(chain(MAX_DEPTH + 1))
+    # Refused before the decoder has followed the string to its end.
+    with pytest.raises(ValueError, match="more than 128 nodes deep"):
+        fn2.Node.from_encoded(chain(100_000))
+    # More nodes than the limit, but only eight deep.
+    node = fn2.Node.from_encoded(base64.b64encode(bytes(sums(8))).decode())
+    assert np.array_equal(node.gen_position_array_2d(X, Y, SEED), np.float32(128.0) * simplex)
 
 
 def test_generation_from_threads() -> None:
