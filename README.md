@@ -14,14 +14,14 @@ Install the wheel of your platform by its URL:
 pip install https://github.com/ZettaAI/pyfastnoise2/releases/download/v1.1.1/<wheel>
 ```
 
-| Platform | Wheel |
+| Platform | Wheel name ends in |
 | --- | --- |
-| Linux x86_64, glibc 2.28 or newer | `manylinux_2_28_x86_64` |
-| Linux aarch64, glibc 2.28 or newer | `manylinux_2_28_aarch64` |
-| macOS 11 or newer, Apple silicon | `macosx_11_0_arm64` |
+| Linux x86_64, glibc 2.28 or newer | `manylinux_2_28_x86_64.whl` |
+| Linux aarch64, glibc 2.28 or newer | `manylinux_2_28_aarch64.whl` |
+| macOS 11 or newer, Apple silicon | `macosx_11_0_arm64.whl` |
 
 The binding does not use the Python C API, so each wheel is tagged `py3-none` and serves
-every Python version from 3.10 on. NumPy is the only dependency.
+every Python version from 3.10 on. NumPy 1.21 or newer is the only dependency.
 
 ## Example
 

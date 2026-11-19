@@ -12,7 +12,7 @@ license = "MIT"
 license-files = ["LICENSE", "LICENSES/*"]
 authors = [{ name = "Zetta AI" }]
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = ["numpy>=1.21"]
 keywords = ["noise", "simplex", "perlin", "fbm", "simd", "procedural"]
 classifiers = [
   "Development Status :: 4 - Beta",
