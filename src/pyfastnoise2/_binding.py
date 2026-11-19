@@ -216,7 +216,7 @@ def members(node_type: str) -> dict[str, Member]:
 def simd_levels() -> tuple[str, ...]:
     """SIMD levels nodes can run at on this CPU, lowest first. The last is the default.
 
-    FastNoise2 is built for bit-identical values at every level, so a lower level only
+    FastNoise2 is built to return the same values at every level, so a lower level only
     costs speed.
     """
     best = Node(node_types()[0])._feature_set

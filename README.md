@@ -68,11 +68,14 @@ FastNoise2 picks the best SIMD level of the CPU at run time: SSE2, SSE4.1, AVX2 
 on x86-64, and the one level of arm64. The library in the wheels is built with
 `FASTNOISE2_STRICT_FP` and without floating-point contraction, which keeps fast-math and
 fused multiply-add out of it, so that every level, compiler and platform returns the same
-float32 bits. The tests compare a set of golden values exactly, on every platform the
-wheels are built for, and every node type between all levels the test machine has.
+float32 values. The tests check this exactly, with golden values of an fBm tree and a
+digest of the values of every node type, on every platform the wheels are built for and
+at every level the test machine has.
 
-One exception is known in FastNoise2 1.1.1: `AddDimension` at 3D positions returns other
-values at AVX2 than at SSE2 and SSE4.1.
+FastNoise2 1.1.1 has three exceptions. `AddDimension` at 3D positions returns other values
+at AVX2 than at SSE2, SSE4.1 and on arm64. `Terrace` returns 0.0 at SSE2 where the other
+levels return -0.0. `DomainRotate` takes the sine and cosine of its angles from the math
+library of the system.
 
 `fn2.simd_levels()` lists the levels of the machine, `node.simd_level` is the one a node
 runs at, and `fn2.Node(..., max_simd_level="SSE2")` runs a node at a lower one.

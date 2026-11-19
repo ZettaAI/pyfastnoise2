@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import copy
 import gc
+import hashlib
 import importlib.metadata
 import os
 import pickle
+import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
@@ -51,6 +53,60 @@ GOLDEN_3D = np.array(
     ],
     dtype=np.uint32,
 ).view(np.float32)  # fmt: skip
+
+NEGATIVE_ZERO = 0x80000000
+
+# lattice_digest(lone_node(node_type)) of every node type, the same on every platform and
+# at every SIMD level.
+GOLDEN_DIGESTS = {
+    "Constant": "fef951e6c76ad6a0",
+    "White": "32de67f7b31ca1b3",
+    "Checkerboard": "4badd1e8307ad842",
+    "SineWave": "ceb40b0a84ac4658",
+    "Gradient": "e5a00aa9991ac8a5",
+    "DistanceToPoint": "0113762fdb558d2a",
+    "Simplex": "9ddce4109cea39b0",
+    "SuperSimplex": "472d232338bf68de",
+    "Perlin": "c49418e1cf6bd1ab",
+    "Value": "dd11910beea13065",
+    "CellularValue": "fbe23635b38767eb",
+    "CellularDistance": "8405c65ca496f475",
+    "CellularLookup": "12adbe4fbf02371d",
+    "FractalFBm": "7792a499b5ce192e",
+    "PingPong": "83e88efce9ef1d91",
+    "FractalRidged": "177c0021ecbeb8d9",
+    "DomainWarpSimplex": "e5c0b54421b8c8f4",
+    "DomainWarpSuperSimplex": "befca694ed43f511",
+    "DomainWarpGradient": "388f84cebf6445e1",
+    "DomainWarpFractalProgressive": "e843d6db7d1c202b",
+    "DomainWarpFractalIndependent": "2942453b1cc918e7",
+    "Add": "3525f76be90d952a",
+    "Subtract": "c372d050b52cc612",
+    "Multiply": "3b8dd613f5b4709b",
+    "Divide": "1a19304354597ed4",
+    "Abs": "4cb753076fc9cee7",
+    "Min": "6e0cc3b2ed28f108",
+    "Max": "806767dc76c2a74d",
+    "MinSmooth": "e5d7ad57ed121585",
+    "MaxSmooth": "c968e53e8ef74ed6",
+    "SignedSquareRoot": "f733a9d3c3a23f26",
+    "PowFloat": "c1ef1bf1d7bf8161",
+    "PowInt": "60bb5e62f58b40d4",
+    "DomainScale": "9ddce4109cea39b0",
+    "DomainOffset": "9ddce4109cea39b0",
+    "DomainRotate": "9ddce4109cea39b0",
+    "DomainAxisScale": "9ddce4109cea39b0",
+    "SeedOffset": "2aadd9127526a013",
+    "ConvertRGBA8": "502f677b198142c7",
+    "GeneratorCache": "9ddce4109cea39b0",
+    "Fade": "9ddce4109cea39b0",
+    "Remap": "87639f7fbdf4339a",
+    "Terrace": "cadf6d7ad0075962",
+    "AddDimension": "162eb45ad62fd7ea",
+    "RemoveDimension": "78e659d180f72ebc",
+    "Modulus": "bd13a26b9e9722c2",
+    "DomainRotatePlane": "0483e68f168c0788",
+}
 
 # A 4 x 3 grid and a 4 x 3 x 2 grid.
 GRID_2D: dict[str, Any] = {"x_count": 4, "y_count": 3, "x_step": 0.25, "y_step": 0.5, "seed": SEED}
@@ -203,43 +259,47 @@ def test_simd_levels() -> None:
             fn2.Node("Simplex", max_simd_level=level)
 
 
-def lone_node(node_type: str, max_simd_level: str) -> fn2.Node:
-    """A node of ``node_type`` with its node members set."""
+def lone_node(node_type: str, max_simd_level: str | None = None) -> fn2.Node:
+    """A node of ``node_type`` that has its node members set and is not constant."""
+
+    def source() -> fn2.Node:
+        simplex = fn2.Node("Simplex", max_simd_level=max_simd_level)
+        simplex.set("Feature Scale", 1.0)
+        return simplex
+
     node = fn2.Node(node_type, max_simd_level=max_simd_level)
     for name, member in fn2.members(node_type).items():
         if name == "Feature Scale":
             node.set(name, 1.0)
-        if member.kind == "node":
-            source = fn2.Node("Simplex", max_simd_level=max_simd_level)
-            source.set("Feature Scale", 1.0)
+        elif name == "RHS":
+            node.set(name, 0.37)
+        elif member.kind == "node" or name == "LHS":
             try:
-                node.set(name, source)
+                node.set(name, source())
             except TypeError:
                 warp = fn2.Node("DomainWarpGradient", max_simd_level=max_simd_level)
-                warp.set("Source", source)
+                warp.set("Source", source())
                 node.set(name, warp)
     return node
 
 
-@pytest.mark.parametrize("node_type", fn2.node_types())
-def test_node_type_is_identical_at_every_simd_level(node_type: str) -> None:
+def lattice_digest(node: fn2.Node) -> str:
+    """Digest of the values of ``node`` on a 2D and a 3D lattice."""
     x, y, z = grid_positions((-3.7, 2.1, 0.4), (8, 8, 4), (0.37, 0.41, 0.53))
-    levels = fn2.simd_levels()
-    expected = lone_node(node_type, levels[-1])
-    for level in levels[:-1]:
-        node = lone_node(node_type, level)
-        assert np.array_equal(
-            node.gen_position_array_2d(x, y, SEED),
-            expected.gen_position_array_2d(x, y, SEED),
-            equal_nan=True,
-        ), level
-        # FastNoise2 1.1.1: AddDimension with 3D positions differs at AVX2 from the SSE levels.
-        if node_type != "AddDimension":
-            assert np.array_equal(
-                node.gen_position_array_3d(x, y, z, SEED),
-                expected.gen_position_array_3d(x, y, z, SEED),
-                equal_nan=True,
-            ), level
+    values = [node.gen_position_array_2d(x, y, SEED).ravel()]
+    # FastNoise2 1.1.1: AddDimension at 3D positions differs at AVX2 from the other levels.
+    if node.node_type != "AddDimension":
+        values.append(node.gen_position_array_3d(x, y, z, SEED).ravel())
+    bits = np.concatenate(values).view(np.uint32)
+    # Equal values: SSE2 returns 0.0 where the other levels return -0.0 for Terrace.
+    bits[bits == NEGATIVE_ZERO] = 0
+    return hashlib.sha256(bits.tobytes()).hexdigest()[:16]
+
+
+@pytest.mark.parametrize("node_type", fn2.node_types())
+def test_node_type_at_every_simd_level(node_type: str) -> None:
+    for level in fn2.simd_levels():
+        assert lattice_digest(lone_node(node_type, level)) == GOLDEN_DIGESTS[node_type], level
 
 
 def test_tree_of_mixed_simd_levels_is_rejected() -> None:
@@ -498,7 +558,7 @@ def test_generation_from_threads() -> None:
     assert all(np.array_equal(result, GOLDEN_2D) for result in results)
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.skipif(sys.platform != "linux", reason="fork without exec is only safe on Linux")
 def test_node_survives_fork() -> None:
     node = simplex_fbm()
     read_end, write_end = os.pipe()
