@@ -58,8 +58,11 @@ FastNoise2 Node Editor. Besides `gen_position_array_2d` there are `gen_uniform_g
 `gen_single_2d` and the same three for 3D. The array methods take C-contiguous float32
 arrays and an optional `out`, and raise on anything else.
 
-Generating is thread-safe and releases the GIL. A node cannot be pickled or copied, so
-build it in the process that uses it; a forked child can keep using the nodes of its
+Generating is thread-safe and releases the GIL: any number of threads can generate from
+one tree. Changing a tree is not safe while another thread generates from it: FastNoise2
+reads the members of a node without a lock, and a node that `set` replaces may be freed
+under that thread. Build a tree first, then share it. A node cannot be pickled or copied,
+so build it in the process that uses it; a forked child can keep using the nodes of its
 parent.
 
 ## Identical results on every CPU

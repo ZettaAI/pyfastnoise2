@@ -201,8 +201,9 @@ def _node_type(name: str) -> _NodeType:
     return node_type
 
 
-# Held for every native call that allocates or frees nodes: the node pools of FastNoise2
-# do not survive a free next to another allocation or free.
+# Held for every native call that allocates or frees nodes, since the node pools of
+# FastNoise2 do not survive a free next to another allocation or free, and for all of a
+# set(), since two at once could each pass the cycle check of the other.
 _lock: Final = threading.Lock()
 # Handles of collected nodes that are still to be freed. A finalizer only queues its
 # handle here: the collector runs it anywhere, also inside a section that holds the lock.
@@ -434,8 +435,11 @@ class _EncodedNodeTree:
 class Node:
     """A FastNoise2 node. A node whose members are other nodes is the root of a node tree.
 
-    Generating from a node is thread-safe and runs without the GIL. Changing a node with
-    :meth:`set` while another thread generates from a tree that contains it is not.
+    Generating is thread-safe and runs without the GIL: threads may generate from one
+    tree at the same time. Creating, changing and collecting nodes is thread-safe too,
+    with one exception: do not call :meth:`set` on a node while another thread generates
+    from a tree that contains it. FastNoise2 reads the members of a node without a lock,
+    and a node that :meth:`set` replaces may be freed while that thread still uses it.
 
     A node wraps a native handle, so it cannot be pickled or copied: build it in the
     process that uses it. The native node is freed when the node is collected and no
@@ -519,16 +523,21 @@ class Node:
                 f"{', '.join(map(repr, self._type.members))}"
             )
         index = self._type.indices[name]
+        with _exclusive:
+            if isinstance(value, Node):
+                self._set_source(name, member, index, value)
+            else:
+                self._set_value(name, member, index, value)
+
+    def _set_value(self, name: str, member: Member, index: int, value: float | str) -> None:
         what = f"{self.node_type} member {name!r}"
-        if isinstance(value, Node):
-            self._set_source(name, member, index, value)
-            return
         if member.kind == "node":
             raise TypeError(f"{what} must be a Node, not {type(value).__name__}")
         if member.kind == "hybrid":
             accepted = _lib.fnSetHybridFloat(self._handle, index, _c_float(what, value))
-            # A constant replaces the node the library held for this member.
-            self._sources.pop(name, None)
+            if accepted:
+                # A constant replaces the node the library held for this member.
+                self._sources.pop(name, None)
         elif member.kind == "float":
             accepted = _lib.fnSetVariableFloat(self._handle, index, _c_float(what, value))
         else:

@@ -480,6 +480,40 @@ def test_cycle_is_rejected() -> None:
         fbm.set("Gain", fbm)
 
 
+def test_concurrent_set_cannot_build_a_cycle() -> None:
+    def chain() -> fn2.Node:
+        node = fn2.Node("Abs")
+        node.set("Source", fn2.Node("Simplex"))
+        return node
+
+    def link(parent: fn2.Node, source: fn2.Node) -> None:
+        barrier.wait()
+        try:
+            parent.set("Source", source)
+        except ValueError:
+            refused.append(parent)
+
+    interval = sys.getswitchinterval()
+    # Switch threads as often as possible, also between a cycle check and its set.
+    sys.setswitchinterval(1e-6)
+    try:
+        for _ in range(2_000):
+            first, second = chain(), chain()
+            barrier = threading.Barrier(2)
+            refused: list[fn2.Node] = []
+            threads = [
+                threading.Thread(target=link, args=(first, second)),
+                threading.Thread(target=link, args=(second, first)),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert len(refused) == 1
+    finally:
+        sys.setswitchinterval(interval)
+
+
 def test_source_deleted_before_use() -> None:
     source = fn2.Node("Simplex")
     source.set("Feature Scale", 1.0)
