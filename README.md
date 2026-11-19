@@ -81,10 +81,11 @@ float32 values. The tests check this exactly, with golden values of an fBm tree 
 digest of the values of every node type, on every platform the wheels are built for and
 at every level the test machine has.
 
-FastNoise2 1.1.1 has three exceptions. `AddDimension` at 3D positions returns other values
-at AVX2 than at SSE2, SSE4.1 and on arm64. `Terrace` returns 0.0 at SSE2 where the other
-levels return -0.0. `DomainRotate` takes the sine and cosine of its angles from the math
-library of the system.
+FastNoise2 1.1.1 has three exceptions. `AddDimension` at 3D positions returns arbitrary
+values at AVX2: they differ from those of SSE2, SSE4.1 and arm64, and in some builds they
+change from one process to the next and can be non-finite. `Terrace` returns 0.0 at SSE2
+where the other levels return -0.0. `DomainRotate` takes the sine and cosine of its angles
+from the math library of the system.
 
 `fn2.simd_levels()` lists the levels of the machine, `node.simd_level` is the one a node
 runs at, and `fn2.Node(..., max_simd_level="SSE2")` runs a node at a lower one.
